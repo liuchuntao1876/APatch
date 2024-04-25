@@ -1,133 +1,47 @@
-name: Build Manager
+# main.yml
+# 自动构建 Apk
+name: Test, Build and Release apk
 
+# 工作流程触发的时机，这里是当一个版本标签推送到仓库时触发
 on:
   push:
-    tags: [ "*" ]
-    branches: [ "main" ]
-    paths:
-      - '.github/workflows/build.yml'
-      - 'app/**'
-      - 'apd/**'
-      - 'build.gradle.kts'
-      - 'gradle/libs.versions.toml'
-  pull_request:
-    branches: [ "main" ]
-    paths:
-      - '.github/workflows/build.yml'
-      - 'app/**'
-      - 'apd/**'
-      - 'build.gradle.kts'
-      - 'gradle/libs.versions.toml'
-  workflow_call:
-  workflow_dispatch:
+    tags:
+      - v*
 
+# 这个工作流程需要执行的任务
 jobs:
-  build-manager:
+  process:
+    name: all process
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    # 这个任务的步骤
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # 拉取项目代码
+      - uses: actions/checkout@v2
+      # 建立 java 环境
+      - name: Setup Java JDK
+        uses: actions/setup-java@v1.4.3
         with:
-          fetch-depth: 0
-
-      - name: Generate version
-        id: parse_version
-        run: |
-          COMMIT_NUM=$(git rev-list --count HEAD)
-          VERSION=$(echo "$COMMIT_NUM + 200 + 10000" | bc)
-          echo "Generated Version: $VERSION"
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
+          java-version: "11.x"
+      # 建立 Flutter 环境
+      - name: Flutter action
+        uses: subosito/flutter-action@v1.4.0
         with:
-          distribution: temurin
-          java-version: 21
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-home-cache-cleanup: true
-
-      - name: Setup Android NDK
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r25c
-          add-to-path: true
-          local-cache: true
-
-      - name: Install toolchain
-        run: |
-          rustup default stable
-          cargo install cargo-ndk
-          rustup target install aarch64-linux-android
-
-      - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: apd
-          cache-targets: false
-
-      - name: Build with Gradle
-        run: |
-          echo 'org.gradle.parallel=true' >> gradle.properties
-          echo 'org.gradle.vfs.watch=true' >> gradle.properties
-          echo 'org.gradle.jvmargs=-Xmx2048m' >> gradle.properties
-          echo 'android.native.buildOutput=verbose' >> gradle.properties
-          sed -i 's/org.gradle.configuration-cache=true//g' gradle.properties
-          ./gradlew clean assembleRelease
-
-      - name: Sign Release
-        env: 
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-        if: ${{ env.SIGNING_KEY != '' }}
-        continue-on-error: true
-        uses: kevin-david/zipalign-sign-android-release@v1.1
-        id: sign_app
-        with:
-          releaseDirectory: app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.SIGNING_KEY }}
-          alias: ${{ secrets.ALIAS }}
-          keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
-          keyPassword: ${{ secrets.KEY_PASSWORD }}
-
-      - name: Upload build artifact
-        env: 
-           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-        if: ${{ env.SIGNING_KEY != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: APatch
-          path: ${{steps.sign_app.outputs.signedReleaseFile}}
-      - name: Post to channel
-        if: ${{github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.ref_type != 'tag'}}
+          channel: "stable"
+          flutter-version: "1.22.4"
+      # 下载项目依赖
+      - run: flutter pub get
+      - run: echo $ENCODED_KEYSTORE | base64 -di > android/app/keystore.jks
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
-          COMMIT_URL: ${{ github.event.head_commit.url }}
-          COMMIT_ID: ${{ github.event.head_commit.id }}
-        run: |
-          if [ ! -z "${{ secrets.BOT_TOKEN }}" ]; then
-            OUTPUT="app/build/outputs/apk/release"
-            export Release=$(find $OUTPUT -name "*.apk")
-            URL=$(python3 .github/scripts/telegram_url.py -1002058433411)
-            curl -v "$URL" -F Release=@${{ steps.sign_app.outputs.signedReleaseFile }}
-            URL=$(python3 .github/scripts/telegram_url.py -1001910818234)
-            curl -v "$URL" -F Release=@${{ steps.sign_app.outputs.signedReleaseFile }}
-          fi
+          ENCODED_KEYSTORE: ${{ secrets.ENCODED_KEYSTORE }}
+      # 打包 APK
+      - run: flutter build apk --release
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD}}
+      # 发布到 Release
       - name: Release apk
-        env: 
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-        if: ${{ env.SIGNING_KEY != '' && github.ref_type == 'tag' }}
-        continue-on-error: true
-        uses: ncipollo/release-action@v1
+        uses: ncipollo/release-action@v1.5.0
         with:
-          token: ${{ github.token }}
-          tag: ${{ steps.parse_version.outputs.VERSION }}
-          artifacts: ${{steps.sign_app.outputs.signedReleaseFile}}
-          generateReleaseNotes: true
-          makeLatest: true
-          replacesArtifacts: true
+          artifacts: "build/app/outputs/apk/release/*.apk"
+          token: ${{ secrets.RELEASE_TOKEN }}
